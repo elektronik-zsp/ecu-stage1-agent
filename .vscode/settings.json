@@ -1,0 +1,1 @@
+{"files.associations": {"*.json": "json"}, "python.testing.pytestEnabled": true, "python.testing.pytestArgs": ["tests"]}

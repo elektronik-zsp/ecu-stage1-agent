@@ -1,0 +1,9 @@
+{
+  "profile_name": "generic_unconfigured",
+  "max_torque_nm": 350,
+  "max_boost_bar": 2.0,
+  "max_rail_bar": 1600,
+  "max_percent_increase": 15,
+  "gearbox_limit_nm": 350,
+  "note": "Illustrative safety defaults only; not a validated vehicle calibration profile."
+}

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecu-stage1-agent"
+version = "0.1.0"
+description = "GUI-only ECU file inspection and Stage 1 workflow prototype"
+requires-python = ">=3.11"
+dependencies = ["PySide6>=6.6", "pyqtgraph>=0.13", "numpy>=1.26", "anthropic>=0.40", "keyring>=25", "pydantic>=2"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-qt>=4", "mypy>=1.10"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["core"]
