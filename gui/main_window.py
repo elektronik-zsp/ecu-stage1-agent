@@ -1,31 +1,41 @@
 from __future__ import annotations
 
 from pathlib import Path
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-                               QTabWidget, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-                               QWidget, QTableWidget, QTableWidgetItem, QTextEdit, QLineEdit,
-                               QPushButton, QProgressBar, QStatusBar, QComboBox)
-from core.identify import FileIdentity, identify_dump
+from datetime import datetime, timezone
+
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QTabWidget, QToolBar, QVBoxLayout, QWidget
+
 from core.diffing import diff_bytes
-from core.report import build_markdown_report, NOCHK_WARNING
-from gui.workers import AgentWorker
+from core.identify import FileIdentity, identify_dump
+from core.mapfinder import MapCandidate
+from core.report import NOCHK_WARNING, build_markdown_report
+from gui.dialogs.settings import ProfilesDialog, SettingsDialog
+from gui.panels.agent_chat import AgentChatPanel
+from gui.panels.diff import DiffPanel
+from gui.panels.maps import MapsPanel
+from gui.panels.project import ProjectPanel
+from gui.panels.report import ReportPanel
+from gui.panels.stage1 import Stage1Panel
+from gui.workers import MapScanWorker
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("ECU Stage 1 Agent")
-        self.resize(1250, 800)
+        self.resize(1350, 850)
+        self.setAcceptDrops(True)
         self.original: bytes | None = None
         self.working: bytes | None = None
         self.file_path: Path | None = None
         self.identity: FileIdentity | None = None
-        self._worker: AgentWorker | None = None
-        self.setAcceptDrops(True)
-        self._create_ui()
+        self._scan_worker: MapScanWorker | None = None
+        self._recent_files: list[str] = []
+        self._build_ui()
 
-    def _create_ui(self) -> None:
+    def _build_ui(self) -> None:
+        self._build_menu()
         toolbar = QToolBar("Main")
         self.addToolBar(toolbar)
         open_action = toolbar.addAction("Open")
@@ -34,165 +44,132 @@ class MainWindow(QMainWindow):
         save_action = toolbar.addAction("Save copy _NOCHK")
         save_action.setShortcut("Ctrl+S")
         save_action.triggered.connect(self.save_copy)
-        self.status = QStatusBar()
-        self.setStatusBar(self.status)
-        root = QWidget()
-        layout = QHBoxLayout(root)
-        self.project_tree = QTreeWidget()
-        self.project_tree.setHeaderLabels(["Project", "Value"])
-        self.project_tree.setMinimumWidth(280)
-        self.profile = QComboBox()
-        self.profile.addItem("No vehicle-specific profile loaded")
-        left = QVBoxLayout()
-        left.addWidget(QLabel("Project"))
-        left.addWidget(QPushButton("Open file (.bin/.ori)", clicked=self.open_file))
-        left.addWidget(self.project_tree)
-        left.addWidget(QLabel("Engine profile"))
-        left.addWidget(self.profile)
-        layout.addLayout(left, 1)
+        central = QWidget()
+        layout = QHBoxLayout(central)
+        self.project_panel = ProjectPanel()
+        layout.addWidget(self.project_panel, 1)
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._simple_table(["Name", "Address", "Size", "Confidence", "Status"]), "Maps")
-        self.tabs.addTab(self._stage_tab(), "Stage 1")
-        self.tabs.addTab(self._diff_tab(), "Diff")
-        self.tabs.addTab(self._agent_tab(), "Agent AI")
-        self.tabs.addTab(self._report_tab(), "Report")
+        self.maps_panel = MapsPanel()
+        self.stage1_panel = Stage1Panel()
+        self.diff_panel = DiffPanel()
+        self.agent_panel = AgentChatPanel()
+        self.report_panel = ReportPanel()
+        for panel, title in ((self.maps_panel, "Maps"), (self.stage1_panel, "Stage 1"),
+                             (self.diff_panel, "Diff"), (self.agent_panel, "Agent AI"),
+                             (self.report_panel, "Report")):
+            self.tabs.addTab(panel, title)
         layout.addWidget(self.tabs, 4)
-        self.setCentralWidget(root)
+        self.setCentralWidget(central)
+        self.statusBar().showMessage("Ready — read-only inspection mode")
 
-    @staticmethod
-    def _simple_table(headers: list[str]) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        table = QTableWidget(0, len(headers))
-        table.setHorizontalHeaderLabels(headers)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        layout.addWidget(table)
-        widget.table = table  # type: ignore[attr-defined]
-        return widget
-
-    def _stage_tab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.addWidget(QLabel("No real map definitions or tuning recipes are bundled."))
-        layout.addWidget(QLabel("Any future edit must pass core safety checks and remain within a declared map."))
-        return widget
-
-    def _diff_tab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        self.diff_text = QTextEdit()
-        self.diff_text.setReadOnly(True)
-        layout.addWidget(self.diff_text)
-        return widget
-
-    def _agent_tab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        self.agent_history = QTextEdit()
-        self.agent_history.setReadOnly(True)
-        self.agent_entry = QLineEdit()
-        self.agent_entry.setPlaceholderText("Ask about the inspection workflow")
-        send = QPushButton("Send")
-        send.clicked.connect(self.send_prompt)
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.clicked.connect(self.cancel_agent)
-        self.progress = QProgressBar()
-        row = QHBoxLayout()
-        row.addWidget(self.agent_entry)
-        row.addWidget(send)
-        row.addWidget(self.cancel_button)
-        layout.addWidget(self.agent_history)
-        layout.addLayout(row)
-        layout.addWidget(self.progress)
-        return widget
-
-    def _report_tab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        self.report_text = QTextEdit()
-        self.report_text.setReadOnly(True)
-        layout.addWidget(self.report_text)
-        return widget
+    def _build_menu(self) -> None:
+        file_menu = self.menuBar().addMenu("File")
+        open_action = QAction("Open file…", self)
+        open_action.setShortcut("Ctrl+O")
+        open_action.triggered.connect(self.open_file)
+        file_menu.addAction(open_action)
+        save_action = QAction("Save copy _NOCHK…", self)
+        save_action.setShortcut("Ctrl+S")
+        save_action.triggered.connect(self.save_copy)
+        file_menu.addAction(save_action)
+        self.recent_menu = file_menu.addMenu("Recent files")
+        tools = self.menuBar().addMenu("Tools")
+        scan_action = tools.addAction("Scan maps (read-only)")
+        scan_action.triggered.connect(self.scan_maps)
+        tools.addAction("Settings…", self.open_settings)
+        tools.addAction("Profiles…", self.open_profiles)
 
     def open_file(self, path: str | None = None) -> None:
-        if not path:
+        if not isinstance(path, str) or not path:
             path, _ = QFileDialog.getOpenFileName(self, "Open ECU file", "", "ECU files (*.bin *.ori);;All files (*)")
         if not path:
             return
         try:
             data = Path(path).read_bytes()
-            self.original = data
-            self.working = data
+            self.original = bytes(data)
+            self.working = bytes(data)
             self.file_path = Path(path)
-            self.identity = identify_dump(data, path)
-            self._update_project()
-            self._update_views()
-            self.status.showMessage(f"Opened read-only original: {path}")
+            self.identity = identify_dump(self.original, path)
+            self.project_panel.set_identity(self.identity)
+            self.diff_panel.set_data(self.original, self.working)
+            self.report_panel.text.setPlainText(build_markdown_report(self.identity, self.identity.warnings))
+            self._remember_file(path)
+            self.agent_panel.set_session_dir(Path("sessions") / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+            self.statusBar().showMessage(f"Opened read-only: {path}")
+            self.scan_maps()
         except OSError as exc:
             QMessageBox.critical(self, "Open failed", str(exc))
 
-    def _update_project(self) -> None:
-        assert self.identity is not None
-        self.project_tree.clear()
-        for key, value in (("Family", self.identity.family), ("SW", self.identity.sw_number or "unknown"),
-                           ("HW", self.identity.hw_number or "unknown"), ("Size", str(self.identity.size_bytes)),
-                           ("CRC32", self.identity.crc32), ("SHA256", self.identity.sha256),
-                           ("Warnings", "; ".join(self.identity.warnings) or "none")):
-            QTreeWidgetItem(self.project_tree, [key, value])
+    def _remember_file(self, path: str) -> None:
+        normalized = str(Path(path).resolve())
+        self._recent_files = [normalized] + [item for item in self._recent_files if item != normalized]
+        self._recent_files = self._recent_files[:10]
+        self.recent_menu.clear()
+        for recent in self._recent_files:
+            action = self.recent_menu.addAction(recent)
+            action.triggered.connect(lambda checked=False, item=recent: self.open_file(item))
 
-    def _update_views(self) -> None:
-        if self.identity is None or self.working is None:
+    def scan_maps(self) -> None:
+        if self.original is None:
+            self.statusBar().showMessage("Open a file before scanning.")
             return
-        report = diff_bytes(self.original or b"", self.working)
-        self.diff_text.setPlainText("No edits. Original file remains unchanged." if not report.regions else
-                                    "\n".join(f"0x{r.start:X}: {r.length} bytes; critical={r.critical}" for r in report.regions))
-        self.report_text.setPlainText(build_markdown_report(self.identity, list(self.identity.warnings)))
+        if self._scan_worker is not None and self._scan_worker.isRunning():
+            return
+        self.statusBar().showMessage("Scanning read-only map candidates…")
+        self._scan_worker = MapScanWorker(self.original)
+        self._scan_worker.candidates_ready.connect(self._maps_ready)
+        self._scan_worker.failed.connect(lambda error: self.statusBar().showMessage(f"Scan failed: {error}"))
+        self._scan_worker.start()
+
+    def _maps_ready(self, candidates: object) -> None:
+        assert self.original is not None
+        typed = [candidate for candidate in candidates if isinstance(candidate, MapCandidate)]
+        self.maps_panel.set_candidates(self.original, typed)
+        self.statusBar().showMessage(f"Read-only scan complete: {len(typed)} heuristic candidates; no edits made.")
 
     def save_copy(self) -> None:
         if self.working is None or self.file_path is None:
-            QMessageBox.information(self, "No file", "Open a file before saving a copy.")
+            QMessageBox.information(self, "No file", "Open a file first.")
             return
-        answer = QMessageBox.warning(self, "Checksum warning", NOCHK_WARNING,
-                                     QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel)
-        if answer != QMessageBox.Ok:
+        warning = QMessageBox(self)
+        warning.setWindowTitle("Checksum warning")
+        warning.setIcon(QMessageBox.Warning)
+        warning.setText(NOCHK_WARNING)
+        warning.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        warning.setDefaultButton(QMessageBox.Cancel)
+        if warning.exec() != QMessageBox.Ok:
             return
         suggested = self.file_path.with_name(f"{self.file_path.stem}_stage1_NOCHK.bin")
-        path, _ = QFileDialog.getSaveFileName(self, "Save copy", str(suggested), "Binary files (*.bin)")
-        if path:
-            Path(path).write_bytes(self.working)
-            self.status.showMessage("Saved copy; checksum correction was not performed.")
-
-    def send_prompt(self) -> None:
-        prompt = self.agent_entry.text().strip()
-        if not prompt or (self._worker is not None and self._worker.isRunning()):
+        output, _ = QFileDialog.getSaveFileName(self, "Save copy", str(suggested), "Binary files (*.bin)")
+        if not output:
             return
-        self.agent_history.append(f"You: {prompt}")
-        self.agent_entry.clear()
-        self.progress.setRange(0, 0)
-        self._worker = AgentWorker(prompt)
-        self._worker.result.connect(self._agent_done)
-        self._worker.failed.connect(self._agent_failed)
-        self._worker.finished.connect(lambda: self.progress.setRange(0, 100))
-        self._worker.start()
+        try:
+            Path(output).write_bytes(self.working)
+            self.statusBar().showMessage("Unmodified copy saved; checksum correction was not performed.")
+        except OSError as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
 
-    def _agent_done(self, text: str) -> None:
-        self.agent_history.append(f"Agent: {text}")
+    def open_settings(self) -> None:
+        SettingsDialog(self).exec()
 
-    def _agent_failed(self, error: str) -> None:
-        self.agent_history.append(f"Error: {error}")
+    def open_profiles(self) -> None:
+        ProfilesDialog(self).exec()
 
-    def cancel_agent(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.requestInterruption()
-            self.agent_history.append("Cancellation requested; local planner may finish immediately.")
+    def _refresh_diff(self) -> None:
+        if self.original is not None and self.working is not None:
+            report = diff_bytes(self.original, self.working)
+            self.diff_panel.set_data(self.original, self.working)
+            if report.critical_out_of_bounds:
+                self.statusBar().showMessage("Critical: unexpected byte changes detected.")
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
 
     def dropEvent(self, event) -> None:  # noqa: N802
-        urls = event.mimeData().urls()
-        if urls:
-            path = urls[0].toLocalFile()
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
             if Path(path).suffix.lower() in {".bin", ".ori"}:
                 self.open_file(path)
+                event.acceptProposedAction()
+                return
